@@ -11,18 +11,15 @@ from ceph_volume.exceptions import MultipleLVsError
 logger = logging.getLogger(__name__)
 
 
-osd_list_header_template = """\n
-{osd_id:=^20}"""
-
-
-osd_device_header_template = """
-
-  [{type: >4}]    {path}
+pretty_print_default_template = """
+{0[tags][ceph.cluster_name]}-osd.{0[tags][ceph.osd_id]}
+    VG/LG:              {0[vg_name]}/{0[lv_name]}
+    data_device:        {0[tags][ceph.data_devices]}
 """
 
-device_metadata_item_template = """
-      {tag_name: <25} {value}"""
-
+pretty_print_optional_template = \
+"""    {key: <20}{value}
+"""
 
 def readable_tag(tag):
     actual_name = tag.split('.')[-1]
@@ -31,24 +28,14 @@ def readable_tag(tag):
 
 def pretty_report(report):
     output = []
-    for _id, devices in report.items():
-        output.append(
-            osd_list_header_template.format(osd_id=" osd.%s " % _id)
-        )
-        for device in devices:
-            output.append(
-                osd_device_header_template.format(
-                    type=device['type'],
-                    path=device['path']
-                )
-            )
-            for tag_name, value in device.get('tags', {}).items():
-                output.append(
-                    device_metadata_item_template.format(
-                        tag_name=readable_tag(tag_name),
-                        value=value
-                    )
-                )
+    for _id, device in sorted(report.items()):
+        output.append(pretty_print_default_template.format(device))
+        for device_type in ['journal', 'db', 'wal']:
+            device_name = device['tags'].get('ceph.%s_device' % device_type)
+            if device_name:
+                output.append(pretty_print_optional_template.format(
+                    key=device_type+'_device:', value=device_name
+                ))
     print(''.join(output))
 
 
@@ -123,18 +110,17 @@ class List(object):
         /dev/sda1 or /dev/sda
         """
         lvs = api.Volumes()
+        pvs = api.PVolumes()
         report = {}
-        lv = api.get_lv_from_argument(device)
+        pvs_per_vg = {}
+        for pv in api.PVolumes():
+            pvs_per_vg.setdefault(pv.vg_name, []).append(pv.pv_name)
 
-        # check if there was a pv created with the
-        # name of device
-        pv = api.get_pv(pv_name=device)
-        if pv and not lv:
-            try:
+        lv = api.get_lv_from_argument(device)
+        if not lv:
+            pv = api.get_pv(device)
+            if pv:
                 lv = api.get_lv(vg_name=pv.vg_name)
-            except MultipleLVsError:
-                lvs.filter(vg_name=pv.vg_name)
-                return self.full_report(lvs=lvs)
 
         if lv:
             try:
@@ -143,31 +129,9 @@ class List(object):
                 logger.warning('device is not part of ceph: %s', device)
                 return report
 
-            report.setdefault(_id, [])
-            report[_id].append(
-                lv.as_dict()
-            )
+            lv.tags['ceph.data_devices'] = ', '.join(pvs_per_vg[lv.vg_name])
+            report[_id] = lv.as_dict()
 
-        else:
-            # this has to be a journal/wal/db device (not a logical volume) so try
-            # to find the PARTUUID that should be stored in the OSD logical
-            # volume
-            for device_type in ['journal', 'block', 'wal', 'db']:
-                device_tag_name = 'ceph.%s_device' % device_type
-                device_tag_uuid = 'ceph.%s_uuid' % device_type
-                associated_lv = lvs.get(lv_tags={device_tag_name: device})
-                if associated_lv:
-                    _id = associated_lv.tags['ceph.osd_id']
-                    uuid = associated_lv.tags[device_tag_uuid]
-
-                    report.setdefault(_id, [])
-                    report[_id].append(
-                        {
-                            'tags': {'PARTUUID': uuid},
-                            'type': device_type,
-                            'path': device,
-                        }
-                    )
         return report
 
     def full_report(self, lvs=None):
@@ -178,6 +142,11 @@ class List(object):
         if lvs is None:
             lvs = api.Volumes()
         report = {}
+        pvs_per_vg = {}
+        for pv in api.PVolumes():
+            pvs_per_vg.setdefault(pv.vg_name, []).append(pv.pv_name)
+
+        report = {}
         for lv in lvs:
             try:
                 _id = lv.tags['ceph.osd_id']
@@ -186,30 +155,11 @@ class List(object):
                 # will get ignored
                 continue
 
-            report.setdefault(_id, [])
-            report[_id].append(
-                lv.as_dict()
-            )
-
-            for device_type in ['journal', 'block', 'wal', 'db']:
-                device_uuid = lv.tags.get('ceph.%s_uuid' % device_type)
-                if not device_uuid:
-                    # bluestore will not have a journal, filestore will not have
-                    # a block/wal/db, so we must skip if not present
-                    continue
-                if not api.get_lv(lv_uuid=device_uuid):
-                    # means we have a regular device, so query blkid
-                    disk_device = disk.get_device_from_partuuid(device_uuid)
-                    if disk_device:
-                        report[_id].append(
-                            {
-                                'tags': {'PARTUUID': device_uuid},
-                                'type': device_type,
-                                'path': disk_device,
-                            }
-                        )
+            lv.tags['ceph.data_devices'] = ', '.join(pvs_per_vg[lv.vg_name])
+            report[_id] = lv.as_dict()
 
         return report
+
 
     def main(self):
         sub_command_help = dedent("""
