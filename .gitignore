@@ -34,6 +34,10 @@ core
 *.log
 /src/td
 
+# clion
+.idea/
+cmake-build-debug/
+
 # alpine abuild things
 .abuild/
 alpine/APKBUILD

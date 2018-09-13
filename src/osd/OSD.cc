@@ -4424,6 +4424,8 @@ void OSD::load_pgs()
       store->set_collection_commit_queue(pg->coll, &(shards[shard_index]->context_queue));
     }
 
+    //TODO: ASYNC TREE BUILD
+
     pg->reg_next_scrub();
 
     dout(10) << __func__ << " loaded " << *pg << dendl;

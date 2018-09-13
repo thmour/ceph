@@ -1717,6 +1717,7 @@ PrimaryLogPG::PrimaryLogPG(OSDService *o, OSDMapRef curmap,
       _pool.info, ec_profile, this, coll_t(p), ch, o->store, cct)),
   object_contexts(o->cct, o->cct->_conf->osd_pg_object_context_cache_count),
   snapset_contexts_lock("PrimaryLogPG::snapset_contexts_lock"),
+  backfill_tree(MerkleTree(1024)), //TODO: Should be configurable
   new_backfill(false),
   temp_seq(0),
   snap_trimmer_machine(this)
@@ -12981,6 +12982,31 @@ bool PrimaryLogPG::all_peer_done() const
   }
   return true;
 }
+
+/**
+ * build_tree_by_scan
+ *
+ * Scan pg's objects and build the Merkle tree
+ */
+
+void PrimaryLogPG::build_tree_by_scan() {
+  ghobject_t next;
+  vector<ghobject_t> objects;
+  while(true) {
+    auto ch = osd->store->open_collection();
+    assert(ch);
+    osd->store->collection_list(ch, next,
+            ghobject_t::get_max(),
+            store->get_ideal_list_max(),
+            &objects
+            &next);
+    if(objects.empty()) break;
+    backfill_tree.update_tree(&objects);
+    objects.clear();
+  }
+  backfill_tree.build_tree();
+}
+
 
 /**
  * recover_backfill

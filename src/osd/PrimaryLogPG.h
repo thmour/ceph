@@ -31,6 +31,7 @@
 #include "ReplicatedBackend.h"
 #include "PGTransaction.h"
 #include "cls/cas/cls_cas_ops.h"
+#include "MerkleTree.h"
 
 class CopyFromCallback;
 class PromoteCallback;
@@ -1048,6 +1049,7 @@ protected:
    */
   set<hobject_t> backfills_in_flight;
   map<hobject_t, pg_stat_t> pending_backfill_updates;
+  MerkleTree backfill_tree;
 
   void dump_recovery_info(Formatter *f) const override {
     f->open_array_section("backfill_targets");
