@@ -23,6 +23,7 @@
 #include "OSD.h"
 #include "PG.h"
 #include "Watch.h"
+#include "MerkleTree.h"
 #include "TierAgentState.h"
 #include "messages/MOSDOpReply.h"
 #include "common/Checksummer.h"
@@ -474,7 +475,7 @@ public:
   bool pg_is_undersized() const override {
     return is_undersized();
   }
-  
+
   bool pg_is_repair() const override {
     return is_repair();
   }
@@ -1488,6 +1489,7 @@ public:
   void record_write_error(OpRequestRef op, const hobject_t &soid,
 			  MOSDOpReply *orig_reply, int r);
   void do_pg_op(OpRequestRef op);
+  void do_object_info(OpRequestRef op);
   void do_scan(
     OpRequestRef op,
     ThreadPool::TPHandle &handle);

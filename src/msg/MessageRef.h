@@ -144,6 +144,7 @@ class MOSDPGCreate;
 class MOSDPGInfo;
 class MOSDPGLog;
 class MOSDPGNotify;
+class MOSDPGObjectInfo;
 class MOSDPGPull;
 class MOSDPGPush;
 class MOSDPGPushReply;

@@ -34,6 +34,7 @@
 // #include "messages/MOSDPGLog.h"
 #include "messages/MOSDPGInfo.h"
 #include "messages/MOSDPGTrim.h"
+#include "messages/MOSDPGObjectInfo.h"
 #include "messages/MOSDPGScan.h"
 #include "messages/MOSDPGBackfill.h"
 #include "messages/MOSDPGBackfillRemove.h"
@@ -174,6 +175,7 @@ PG::PG(OSDService *o, OSDMapRef curmap,
   pg_whoami(o->whoami, p.shard),
   pg_id(p),
   coll(p),
+  backfill_tree(o->cct->_conf.get_val<uint64_t>("osd_pg_object_info_size")),
   osd(o),
   cct(o->cct),
   osdriver(osd->store, coll_t(), OSD::make_snapmapper_oid()),
@@ -868,6 +870,7 @@ void PG::init(
 void PG::shutdown()
 {
   ch->flush();
+  persist_object_info();
   lock();
   recovery_state.shutdown();
   on_shutdown();
@@ -3470,6 +3473,19 @@ bool PG::can_discard_replica_op(OpRequestRef& op)
   return false;
 }
 
+bool PG::can_discard_object_info(OpRequestRef op)
+{
+  const MOSDPGObjectInfo *m =
+      static_cast<const MOSDPGObjectInfo *>(op->get_req());
+  ceph_assert(m->get_type() == MSG_OSD_PG_OBJECT_INFO);
+
+  if (old_peering_msg(m->map_epoch, m->query_epoch)) {
+    dout(10) << " got old scan, ignoring" << dendl;
+    return true;
+  }
+  return false;
+}
+
 bool PG::can_discard_scan(OpRequestRef op)
 {
   const MOSDPGScan *m = static_cast<const MOSDPGScan *>(op->get_req());
@@ -3540,6 +3556,8 @@ bool PG::can_discard_request(OpRequestRef& op)
     return can_discard_replica_op<
       MOSDPGUpdateLogMissingReply, MSG_OSD_PG_UPDATE_LOG_MISSING_REPLY>(op);
 
+  case MSG_OSD_PG_OBJECT_INFO:
+    return can_discard_object_info(op);
   case MSG_OSD_PG_SCAN:
     return can_discard_scan(op);
   case MSG_OSD_PG_BACKFILL:
@@ -3893,4 +3911,101 @@ void PG::with_heartbeat_peers(std::function<void(int)> f)
 
 uint64_t PG::get_min_alloc_size() const {
   return osd->store->get_min_alloc_size();
+}
+
+/**
+ * build_tree_by_scan
+ *
+ * Scan pg's objects and build the Merkle tree
+ */
+
+bool PG::build_tree_by_scan() {
+  ghobject_t next = ghobject_t(hobject_t(),
+			       ghobject_t::NO_GEN,
+			       pg_whoami.shard);
+  vector<ghobject_t> objects;
+  size_t len = osd->store->get_ideal_list_max();
+  objects.reserve(len);
+
+  auto ch = osd->store->open_collection(coll);
+  if (!ch) {
+    derr << __func__
+         << " cannot open collection: " << coll
+         << " ch: " << ch
+         << dendl;
+    return false;
+  }
+  do {
+    int r = osd->store->collection_list(
+        ch,
+        next,
+        ghobject_t::get_max(),
+        len,
+        &objects,
+        &next);
+
+    if (r!=0) {
+      derr << __func__
+	       << " list collection " << ch
+	       << " got: " << cpp_strerror(r)
+	       << dendl;
+      break;
+    }
+
+    eversion_t version;
+    for(auto& ghobj : objects) {
+      if (ghobj.is_pgmeta() || ghobj.hobj.is_temp() || !ghobj.is_no_gen()) {
+	    continue;
+      }
+      hobject_t o = ghobj.hobj;
+
+      bufferlist bl;
+      r = osd->store->getattr(ch, ghobj, OI_ATTR, bl);
+      if (r == -ENOENT)
+        continue;
+      ceph_assert(r >= 0);
+      object_info_t oi(bl);
+      version = oi.version;
+
+      backfill_tree.update_leaf(std::pair(o, version));
+    }
+    objects.clear();
+  } while(!next.is_max());
+  backfill_tree.build_tree();
+  dout(1) << __func__
+          << " built tree "
+          << backfill_tree.get_root()
+          << dendl;
+
+  return true;
+}
+
+void PG::get_or_create_object_info() {
+  bufferlist bl;
+  ghobject_t pg_os_id = OSD::make_pg_objectstate_oid(info.pgid);
+  int r = osd->store->read(osd->meta_ch, pg_os_id, 0, 0, bl);
+  if(r > 0) {
+    //Exists, deserialize
+    bufferlist::const_iterator pbl = bl.begin();
+    backfill_tree.decode(pbl);
+  } else {
+    if(build_tree_by_scan()) {
+      dout(10) << __func__
+               << " backfill info created"
+               << dendl;
+    }
+  }
+}
+
+void PG::persist_object_info() {
+  bufferlist bl;
+  ghobject_t pg_os_id = OSD::make_pg_objectstate_oid(info.pgid);
+
+  bl.clear();
+  backfill_tree.encode(bl);
+
+  ObjectStore::Transaction t;
+  t.write(coll_t::meta(), pg_os_id, 0, bl.length(), bl);
+  int r = osd->store->queue_transaction(osd->meta_ch, std::move(t));
+  ceph_assert(r >= 0);
 }

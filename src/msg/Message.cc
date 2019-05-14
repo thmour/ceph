@@ -88,6 +88,7 @@
 #include "messages/MOSDRepScrub.h"
 #include "messages/MOSDRepScrubMap.h"
 #include "messages/MOSDForceRecovery.h"
+#include "messages/MOSDPGObjectInfo.h"
 #include "messages/MOSDPGScan.h"
 #include "messages/MOSDPGBackfill.h"
 #include "messages/MOSDBackoff.h"
@@ -559,6 +560,9 @@ Message *decode_message(CephContext *cct, int crcflags,
     break;
   case MSG_OSD_PG_SCAN:
     m = make_message<MOSDPGScan>();
+    break;
+  case MSG_OSD_PG_OBJECT_INFO:
+    m = make_message<MOSDPGObjectInfo>();
     break;
   case MSG_OSD_PG_BACKFILL:
     m = make_message<MOSDPGBackfill>();
