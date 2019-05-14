@@ -23,6 +23,7 @@
 #include "include/random.h"
 #include "include/util.h"
 #include "OSD.h"
+#include "MerkleTree.h"
 
 #define dout_context cct
 #define dout_subsys ceph_subsys_osd
@@ -448,6 +449,8 @@ void ReplicatedBackend::submit_transaction(
   const hobject_t &soid,
   const object_stat_sum_t &delta_stats,
   const eversion_t &at_version,
+  const eversion_t &old_version,
+  const eversion_t &new_version,
   PGTransactionUPtr &&_t,
   const eversion_t &trim_to,
   const eversion_t &roll_forward_to,
@@ -495,6 +498,8 @@ void ReplicatedBackend::submit_transaction(
   issue_op(
     soid,
     at_version,
+    old_version,
+    new_version,
     tid,
     reqid,
     trim_to,
@@ -917,6 +922,8 @@ void ReplicatedBackend::do_push_reply(OpRequestRef op)
 Message * ReplicatedBackend::generate_subop(
   const hobject_t &soid,
   const eversion_t &at_version,
+  const eversion_t &old_version,
+  const eversion_t &new_version,
   ceph_tid_t tid,
   osd_reqid_t reqid,
   eversion_t pg_trim_to,
@@ -937,12 +944,14 @@ Message * ReplicatedBackend::generate_subop(
     soid, acks_wanted,
     get_osdmap_epoch(),
     parent->get_last_peering_reset_epoch(),
-    tid, at_version);
+    tid, at_version, old_version, new_version);
 
   // ship resulting transaction, log entries, and pg_stats
   if (!parent->should_send_op(peer, soid)) {
     ObjectStore::Transaction t;
     encode(t, wr->get_data());
+    //update skip ranges to not exclude that object
+
   } else {
     encode(op_t, wr->get_data());
     wr->get_header().data_off = op_t.get_data_alignment();
@@ -967,6 +976,8 @@ Message * ReplicatedBackend::generate_subop(
 void ReplicatedBackend::issue_op(
   const hobject_t &soid,
   const eversion_t &at_version,
+  const eversion_t &old_version,
+  const eversion_t &new_version,
   ceph_tid_t tid,
   osd_reqid_t reqid,
   eversion_t pg_trim_to,
@@ -1000,6 +1011,8 @@ void ReplicatedBackend::issue_op(
       wr = generate_subop(
 	  soid,
 	  at_version,
+      old_version,
+      new_version,
 	  tid,
 	  reqid,
 	  pg_trim_to,
@@ -1097,6 +1110,25 @@ void ReplicatedBackend::do_repop(OpRequestRef op)
       dout(30) << " entry is_delete " << e.is_delete() << dendl;
     }
   }
+
+  if (m->new_temp_oid == hobject_t()) { //if object is not temp
+    eversion_t old_v = m->object_ctx_old_v;
+    eversion_t new_v = m->object_ctx_new_v;
+   
+    uint64_t delta_hash = 0;
+    if (new_v == eversion_t()) { //if delete, undo (hash,old_v) from backfill tree
+      delta_hash = hash_pair(m->poid, old_v);
+    } else {
+      delta_hash = hash_pair(m->poid, new_v) ^
+        (old_v != eversion_t() ?
+          hash_pair(m->poid, old_v) : 0);
+    }
+    dout(10) << __func__ << " update object info (replica): " << m->poid.get_hash()
+             << " from " << old_v << " to " << new_v
+             << " with delta hash " << delta_hash << dendl;
+    get_parent()->update_object_info(m->poid, delta_hash);
+  }
+
 
   parent->update_stats(m->pg_stats);
   parent->log_operation(

@@ -7,9 +7,9 @@
  *
  * This is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
- * License version 2.1, as published by the Free Software 
+ * License version 2.1, as published by the Free Software
  * Foundation.  See file COPYING.
- * 
+ *
  */
 
 #ifndef CEPH_PG_H
@@ -27,7 +27,7 @@
 #include "include/mempool.h"
 
 // re-include our assert to clobber boost's
-#include "include/ceph_assert.h" 
+#include "include/ceph_assert.h"
 
 #include "include/types.h"
 #include "include/stringify.h"
@@ -45,6 +45,8 @@
 #include "PGPeeringEvent.h"
 #include "PeeringState.h"
 #include "MissingLoc.h"
+#include "MerkleTree.h"
+#include "HashRangeIndex.h"
 
 #include "mgr/OSDPerfMetricTypes.h"
 
@@ -53,6 +55,8 @@
 #include <memory>
 #include <string>
 #include <tuple>
+#include <vector>
+#include <queue>
 
 //#define DEBUG_RECOVERY_OIDS   // track set of recovering oids explicitly, to find counting bugs
 //#define PG_DEBUG_REFS    // track provenance of pg refs, helpful for finding leaks
@@ -62,6 +66,7 @@ class OSDService;
 class OSDShard;
 class OSDShardPGSlot;
 class MOSDOp;
+class MOSDPGObjectInfo;
 class MOSDPGScan;
 class MOSDPGBackfill;
 class MOSDPGInfo;
@@ -327,6 +332,12 @@ public:
   static bool has_shard(bool ec, const vector<int>& v, pg_shard_t osd) {
     return PeeringState::has_shard(ec, v, osd);
   }
+
+  // PG objects info
+  MerkleTree backfill_tree;
+  bool build_tree_by_scan();
+  void get_or_create_object_info();
+  void persist_object_info();
 
   /// initialize created PG
   void init(
@@ -700,6 +711,7 @@ public:
    * 1) begin == end == hobject_t() indicates the the interval is unpopulated
    * 2) Else, objects contains all objects in [begin, end)
    */
+
   struct BackfillInterval {
     // info about a backfill interval on a peer
     eversion_t version; /// version at which the scan occurred
@@ -1482,6 +1494,7 @@ protected:
 
   // OpRequest queueing
   bool can_discard_op(OpRequestRef& op);
+  bool can_discard_object_info(OpRequestRef op);
   bool can_discard_scan(OpRequestRef op);
   bool can_discard_backfill(OpRequestRef op);
   bool can_discard_request(OpRequestRef& op);

@@ -34,6 +34,7 @@
 #include "messages/MOSDBackoff.h"
 #include "messages/MOSDPGTrim.h"
 #include "messages/MOSDPGScan.h"
+#include <messages/MOSDPGObjectInfo.h>
 #include "messages/MOSDRepScrub.h"
 #include "messages/MOSDPGBackfill.h"
 #include "messages/MOSDPGBackfillRemove.h"
@@ -539,6 +540,10 @@ bool PrimaryLogPG::should_send_op(
   return should_send;
 }
 
+void PrimaryLogPG::update_oi_skip_ranges(hobject_t hoid) {
+    //TODO: delete ranges or split in two excluding hoid
+    backfill_ranges_to_skip.remove(hoid, pg_whoami);
+}
 
 ConnectionRef PrimaryLogPG::get_con_osd_cluster(
   int peer, epoch_t from_epoch)
@@ -1438,7 +1443,7 @@ void PrimaryLogPG::do_pg_op(OpRequestRef op)
 	  if (candidate >= next) {
 	    break;
 	  }
-	    
+
 	  if (response.entries.size() == list_size) {
 	    next = candidate;
 	    break;
@@ -1595,7 +1600,7 @@ PrimaryLogPG::PrimaryLogPG(OSDService *o, OSDMapRef curmap,
   new_backfill(false),
   temp_seq(0),
   snap_trimmer_machine(this)
-{ 
+{
   recovery_state.set_backend_predicates(
     pgbackend->get_is_readable_predicate(),
     pgbackend->get_is_recoverable_predicate());
@@ -1745,6 +1750,10 @@ void PrimaryLogPG::do_request(
       handle_backoff(op);
       break;
     }
+    break;
+
+  case MSG_OSD_PG_OBJECT_INFO:
+    do_object_info(op);
     break;
 
   case MSG_OSD_PG_SCAN:
@@ -2372,14 +2381,14 @@ PrimaryLogPG::cache_result_t PrimaryLogPG::maybe_handle_manifest_detail(
     if (op->may_write() || write_ordered) {
       do_proxy_write(op, obc);
     } else {
-      // promoted object 
+      // promoted object
       if (obc->obs.oi.size != 0) {
 	return cache_result_t::NOOP;
       }
       do_proxy_read(op, obc);
     }
     return cache_result_t::HANDLED_PROXY;
-  case object_manifest_t::TYPE_CHUNKED: 
+  case object_manifest_t::TYPE_CHUNKED:
     {
       if (can_proxy_chunked_read(op, obc)) {
 	map<hobject_t,FlushOpRef>::iterator p = flush_ops.find(obc->obs.oi.soid);
@@ -3019,8 +3028,8 @@ struct C_ProxyChunkRead : public Context {
 	}
 	prdop->ops[op_index].outdata.copy_in(copy_offset, obj_op->ops[0].outdata.length(),
 					     obj_op->ops[0].outdata.c_str());
-      } 	
-      
+      }
+
       pg->finish_proxy_read(oid, tid, r);
       pg->osd->logger->tinc(l_osd_tier_r_lat, ceph_clock_now() - start);
       if (obj_op) {
@@ -3315,21 +3324,21 @@ void PrimaryLogPG::do_proxy_chunked_op(OpRequestRef op, const hobject_t& missing
       chunk_index = 0;
       chunk_length = 0;
       /* find the right chunk position for cursor */
-      for (auto &p : manifest->chunk_map) {                                                                        
-	if (p.first <= cursor && p.first + p.second.length > cursor) {                                             
-	  chunk_length = p.second.length;                                                                          
-	  chunk_index = p.first;                                                                                   
+      for (auto &p : manifest->chunk_map) {
+	if (p.first <= cursor && p.first + p.second.length > cursor) {
+	  chunk_length = p.second.length;
+	  chunk_index = p.first;
 	  break;
 	}
-      } 
+      }
       /* no index */
       if (!chunk_index && !chunk_length) {
 	if (cursor == osd_op->op.extent.offset) {
-	  OpContext *ctx = new OpContext(op, m->get_reqid(), &m->ops, this);                                        
+	  OpContext *ctx = new OpContext(op, m->get_reqid(), &m->ops, this);
 	  ctx->reply = new MOSDOpReply(m, 0, get_osdmap_epoch(), 0, false);
-	  ctx->data_off = osd_op->op.extent.offset;                                                                
-	  ctx->ignore_log_op_stats = true;                                                                         
-	  complete_read_ctx(0, ctx);                                                                               
+	  ctx->data_off = osd_op->op.extent.offset;
+	  ctx->ignore_log_op_stats = true;
+	  complete_read_ctx(0, ctx);
 	}
 	break;
       }
@@ -3341,9 +3350,9 @@ void PrimaryLogPG::do_proxy_chunked_op(OpRequestRef op, const hobject_t& missing
       }
       /* the size to read -> |   op length   | */
       /*		     | 	 a chunk | */
-      if (cursor + next_length > chunk_index + chunk_length) {                                                  
-	next_length = chunk_index + chunk_length - cursor;                                                      
-      } 
+      if (cursor + next_length > chunk_index + chunk_length) {
+	next_length = chunk_index + chunk_length - cursor;
+      }
 
       chunk_read[cursor] = {{chunk_index, next_length}};
       cursor += next_length;
@@ -3352,12 +3361,12 @@ void PrimaryLogPG::do_proxy_chunked_op(OpRequestRef op, const hobject_t& missing
     req_len = cursor - osd_op->op.extent.offset;
     for (auto &p : chunk_read) {
       auto chunks = p.second.begin();
-      dout(20) << __func__ << " chunk_index: " << chunks->first 
-	      << " next_length: " << chunks->second << " cursor: " 
+      dout(20) << __func__ << " chunk_index: " << chunks->first
+	      << " next_length: " << chunks->second << " cursor: "
 	      << p.first << dendl;
       do_proxy_chunked_read(op, obc, i, chunks->first, p.first, chunks->second, req_len, write_ordered);
     }
-  } 
+  }
 }
 
 struct RefCountCallback : public Context {
@@ -3448,7 +3457,7 @@ void PrimaryLogPG::refcount_manifest(ObjectContextRef obc, object_locator_t oloc
                    CEPH_OSD_FLAG_RWORDERED;                      
 
   dout(10) << __func__ << " Start refcount for " << soid << dendl;
-    
+
   ObjectOperation obj_op;
   bufferlist in;
   if (get) {             
@@ -3579,7 +3588,7 @@ bool PrimaryLogPG::can_proxy_chunked_read(OpRequestRef op, ObjectContextRef obc)
 	    cursor += p.second.length;
 	  }
 	}
-	
+
 	if (remain) {
 	  dout(20) << __func__ << " requested chunks don't exist in chunk_map " << dendl;
 	  return false;
@@ -3868,14 +3877,14 @@ void PrimaryLogPG::execute_ctx(OpContext *ctx)
     ctx->mtime = m->get_mtime();
 
     dout(10) << __func__ << " " << soid << " " << *ctx->ops
-	     << " ov " << obc->obs.oi.version << " av " << ctx->at_version 
+	     << " ov " << obc->obs.oi.version << " av " << ctx->at_version
 	     << " snapc " << ctx->snapc
 	     << " snapset " << obc->ssc->snapset
-	     << dendl;  
+	     << dendl;
   } else {
     dout(10) << __func__ << " " << soid << " " << *ctx->ops
 	     << " ov " << obc->obs.oi.version
-	     << dendl;  
+	     << dendl;
   }
 
   if (!ctx->user_at_version)
@@ -3890,7 +3899,9 @@ void PrimaryLogPG::execute_ctx(OpContext *ctx)
         reqid.name._num, reqid.tid, reqid.inc);
   }
 
+  eversion_t prev = ctx->obs->oi.version;
   int result = prepare_transaction(ctx);
+  ctx->new_obs.oi.version = prev; //hack to keep old version
 
   {
 #ifdef WITH_LTTNG
@@ -4122,6 +4133,79 @@ void PrimaryLogPG::set_dynamic_perf_stats_queries(
 void PrimaryLogPG::get_dynamic_perf_stats(DynamicPerfStats *stats)
 {
   std::swap(m_dynamic_perf_stats, *stats);
+}
+
+void PrimaryLogPG::do_object_info(OpRequestRef op)
+{
+  const MOSDPGObjectInfo *m = static_cast<const MOSDPGObjectInfo*>(op->get_req());
+  ceph_assert(m->get_type() == MSG_OSD_PG_OBJECT_INFO);
+  dout(10) << "do_object_info " << *m << dendl;
+
+  bool is_reply = false;
+  op->mark_started();
+  switch(m->op) {
+    case MOSDPGObjectInfo::OP_GET_DIFF:
+    {
+      uint64_t from_top_hash;
+      auto p = m->get_data().cbegin();
+      decode(from_top_hash, p);
+      bool top_hash_eq = from_top_hash == backfill_tree.get_root()->value;
+      MOSDPGObjectInfo *reply;
+      if (top_hash_eq) {
+        reply = new MOSDPGObjectInfo(
+          MOSDPGObjectInfo::OP_HEAD,
+          pg_whoami, spg_t(info.pgid.pgid, get_primary().shard),
+          get_osdmap_epoch(), m->query_epoch);
+      } else {
+        reply = new MOSDPGObjectInfo(
+          MOSDPGObjectInfo::OP_FULL,
+          pg_whoami, spg_t(info.pgid.pgid, get_primary().shard),
+          get_osdmap_epoch(), m->query_epoch);
+        backfill_tree.encode(reply->get_data());
+      }
+      osd->send_message_osd_cluster(reply, m->get_connection());
+    }
+    break;
+
+    case MOSDPGObjectInfo::OP_FULL:
+    {
+      is_reply = is_primary();
+
+      MerkleTree bt_tree;
+      auto p = m->get_data().cbegin();
+      bt_tree.decode(p);
+      backfill_tree.compare(bt_tree, backfill_ranges_to_skip, m->from);
+      if (is_primary()) {
+        MOSDPGObjectInfo *reply = new MOSDPGObjectInfo(
+          MOSDPGObjectInfo::OP_FULL,
+          pg_whoami, spg_t(info.pgid.pgid, m->from.shard),
+          get_osdmap_epoch(), m->query_epoch);
+        backfill_tree.encode(reply->get_data());
+        osd->send_message_osd_cluster(reply, m->get_connection());
+      }
+    }
+    break;
+
+    case MOSDPGObjectInfo::OP_HEAD:
+    {
+      is_reply = true;
+      backfill_ranges_to_skip.ignore(m->from);
+    }
+    break;
+  }
+
+  if(is_reply) {
+    if (waiting_on_backfill.erase(m->from)) {
+      if (waiting_on_backfill.empty()) {
+        ceph_assert(
+                peer_backfill_info.size() ==
+                get_backfill_targets().size());
+        finish_recovery_op(hobject_t::get_max());
+      }
+    } else {
+      dout(20) << __func__ << " canceled object info request" << dendl;
+    }
+  }
 }
 
 void PrimaryLogPG::do_scan(
@@ -5719,7 +5803,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
     }
 
     switch (op.op) {
-      
+
       // --- READS ---
 
     case CEPH_OSD_OP_CMPEXT:
@@ -6059,7 +6143,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	result = getattrs_maybe_cache(
 	  ctx->obc,
 	  &out);
-        
+
         bufferlist bl;
         encode(out, bl);
 	ctx->delta_stats.num_rd_kb += shift_round_up(bl.length(), 10);
@@ -6067,7 +6151,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
         osd_op.outdata.claim_append(bl);
       }
       break;
-      
+
     case CEPH_OSD_OP_CMPXATTR:
       ++ctx->num_read;
       {
@@ -6076,7 +6160,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	tracepoint(osd, do_osd_op_pre_cmpxattr, soid.oid.name.c_str(), soid.snap.val, aname.c_str());
 	string name = "_" + aname;
 	name[op.xattr.name_len + 1] = 0;
-	
+
 	bufferlist xattr;
 	result = getattr_maybe_cache(
 	  ctx->obc,
@@ -6084,7 +6168,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	  &xattr);
 	if (result < 0 && result != -EEXIST && result != -ENODATA)
 	  break;
-	
+
 	ctx->delta_stats.num_rd++;
 	ctx->delta_stats.num_rd_kb += shift_round_up(xattr.length(), 10);
 
@@ -6246,7 +6330,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
         }
 	if (result < 0) {
 	  break;
-	}	  
+	}
         if (!ctx->obc->obs.oi.is_whiteout()) {
           ceph_assert(obs.exists);
           clone_info ci;
@@ -6450,7 +6534,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	dout(10) << "clean_regions modified" << ctx->clean_regions << dendl;
       }
       break;
-      
+
     case CEPH_OSD_OP_WRITEFULL:
       ++ctx->num_write;
       result = 0;
@@ -6516,7 +6600,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
           static_cast<Option::size_t>(osd->osd_max_object_size), get_dpp());
 	if (result < 0)
 	  break;
- 
+
 	ceph_assert(op.extent.length);
 	if (obs.exists && !oi.is_whiteout()) {
 	  t->zero(soid, op.extent.offset, op.extent.length);
@@ -6617,7 +6701,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	oi.clear_data_digest();
       }
       break;
-    
+
     case CEPH_OSD_OP_DELETE:
       ++ctx->num_write;
       result = 0;
@@ -6628,7 +6712,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	    ctx->register_on_commit(
 	      [oi, ctx, this](){
 	      object_locator_t target_oloc(oi.manifest.redirect_target);
-	      refcount_manifest(ctx->obc, target_oloc, oi.manifest.redirect_target, 
+	      refcount_manifest(ctx->obc, target_oloc, oi.manifest.redirect_target,
 				SnapContext(), false, NULL, 0);
 	    });
 	  } else if (oi.manifest.is_chunked()) {
@@ -6637,13 +6721,13 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	      for (auto p : oi.manifest.chunk_map) {
 		if (p.second.has_reference()) {
 		  object_locator_t target_oloc(p.second.oid);
-		  refcount_manifest(ctx->obc, target_oloc, p.second.oid, 
+		  refcount_manifest(ctx->obc, target_oloc, p.second.oid,
 				    SnapContext(), false, NULL, p.first);
 		}
 	      }
 	    });
-	  } 
-	} 
+	  }
+	}
 	result = _delete_oid(ctx, false, ctx->ignore_cache);
       }
       break;
@@ -6919,7 +7003,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	  result = -EINVAL;
 	  goto fail;
 	}
-	
+
 	if (!src_length) {
 	  result = -EINVAL;
 	  goto fail;
@@ -6973,7 +7057,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	  chunk_info.offset = tgt_offset;
 	  chunk_info.length= src_length;
 	  oi.manifest.chunk_map[src_offset] = chunk_info;
-	  if (!oi.has_manifest() && !oi.manifest.is_chunked()) 
+	  if (!oi.has_manifest() && !oi.manifest.is_chunked())
 	    ctx->delta_stats.num_objects_manifest++;
 	  oi.set_flag(object_info_t::FLAG_MANIFEST);
 	  oi.manifest.type = object_manifest_t::TYPE_CHUNKED;
@@ -6985,7 +7069,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	  }
 	  ctx->modify = true;
 
-	  dout(10) << "set-chunked oid:" << oi.soid << " user_version: " << oi.user_version 
+	  dout(10) << "set-chunked oid:" << oi.soid << " user_version: " << oi.user_version
 		   << " chunk_info: " << chunk_info << dendl;
 	  if (op_finisher) {
 	    ctx->op_finishers.erase(ctx->current_osd_subop_num);
@@ -7150,7 +7234,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
       break;
 
       // -- object attrs --
-      
+
     case CEPH_OSD_OP_SETXATTR:
       ++ctx->num_write;
       result = 0;
@@ -7196,7 +7280,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
  	ctx->delta_stats.num_wr++;
       }
       break;
-    
+
 
       // -- fancy writers --
     case CEPH_OSD_OP_APPEND:
@@ -7471,7 +7555,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	  goto fail;
 	}
 	tracepoint(osd, do_osd_op_pre_omap_cmp, soid.oid.name.c_str(), soid.snap.val, list_keys(assertions).c_str());
-	
+
 	map<string, bufferlist> out;
 
 	if (oi.is_omap()) {
@@ -8529,7 +8613,7 @@ void PrimaryLogPG::finish_ctx(OpContext *ctx, int log_op_type, int result)
     ctx->new_obs.oi.user_version = ctx->user_at_version;
   }
   ctx->bytes_written = ctx->op_t->get_bytes_written();
- 
+
   if (ctx->new_obs.exists) {
     ctx->new_obs.oi.version = ctx->at_version;
     ctx->new_obs.oi.prior_version = ctx->obs->oi.version;
@@ -8613,6 +8697,23 @@ void PrimaryLogPG::finish_ctx(OpContext *ctx, int log_op_type, int result)
     ctx->obc->ssc->exists = true;
     ctx->obc->ssc->snapset = ctx->new_snapset;
   }
+}
+
+void PrimaryLogPG::update_object_info(hobject_t soid, uint64_t delta_hash) {
+  if(!backfill_tree.built) {
+    backfill_tree.build_tree();
+  }
+  backfill_tree.update_object(soid, delta_hash);
+  dout(20) << " mto: " << backfill_tree.objects
+           << " ru: " << backfill_tree.ranges_used
+           << " omin: " << backfill_tree.omin
+           << " omax: " << backfill_tree.omax
+           << dendl;
+  dout(20) << __func__
+           << " update object info (replica): " << soid
+           << " delta hash " << delta_hash
+           << " head hash after update: " << backfill_tree.get_root()->value
+           << dendl;
 }
 
 void PrimaryLogPG::apply_stats(
@@ -10530,7 +10631,7 @@ void PrimaryLogPG::eval_repop(RepGather *repop)
 
     dout(10) << " removing " << *repop << dendl;
     ceph_assert(!repop_queue.empty());
-    dout(20) << "   q front is " << *repop_queue.front() << dendl; 
+    dout(20) << "   q front is " << *repop_queue.front() << dendl;
     if (repop_queue.front() == repop) {
       RepGather *to_remove = nullptr;
       while (!repop_queue.empty() &&
@@ -10574,6 +10675,42 @@ void PrimaryLogPG::issue_repop(RepGather *repop, OpContext *ctx)
     projected_log.add(entry);
   }
 
+  if (!ctx->update_log_only && ctx->op->may_write()) {
+    uint64_t delta_hash = 0;
+    if (ctx->obs->oi.version == eversion_t()) {
+      delta_hash = hash_pair(soid, ctx->new_obs.oi.version);
+    } else if (ctx->new_obs.oi.version == eversion_t()) {
+      delta_hash = hash_pair(soid, ctx->obs->oi.version);
+    } else {
+      delta_hash = hash_pair(soid, ctx->obs->oi.version) ^
+	               hash_pair(soid, ctx->new_obs.oi.version);
+    }
+
+    if (delta_hash) {
+      if(!backfill_tree.built) {
+        backfill_tree.build_tree();
+      }
+      backfill_tree.update_object(soid, delta_hash);
+
+      dout(20) << " mto: " << backfill_tree.objects
+               << " ru: " << backfill_tree.ranges_used
+               << " omin: " << backfill_tree.omin
+               << " omax: " << backfill_tree.omax
+               << dendl;
+      //dout(20) << " leave values:" << backfill_tree.print_leaves()
+      //         << dendl;
+      dout(20) << __func__
+               << " update object info (primary): " << soid.oid.name << "::" << soid.get_hash()
+               << " versions: "
+               << ctx->new_obs.oi.version
+               << " to "
+               << ctx->obs->oi.version
+               << " delta_hash " << delta_hash
+               << " head hash after update: " << backfill_tree.get_root()->value
+               << dendl;
+    }
+  }
+
   recovery_state.pre_submit_op(
     soid,
     ctx->log,
@@ -10582,6 +10719,8 @@ void PrimaryLogPG::issue_repop(RepGather *repop, OpContext *ctx)
     soid,
     ctx->delta_stats,
     ctx->at_version,
+    ctx->new_obs.oi.version,
+    ctx->obs->oi.version,
     std::move(ctx->op_t),
     recovery_state.get_pg_trim_to(),
     recovery_state.get_min_last_complete_ondisk(),
@@ -10641,7 +10780,7 @@ boost::intrusive_ptr<PrimaryLogPG::RepGather> PrimaryLogPG::new_repop(
   dout(10) << __func__ << ": " << *repop << dendl;
   return boost::intrusive_ptr<RepGather>(repop);
 }
- 
+
 void PrimaryLogPG::remove_repop(RepGather *repop)
 {
   dout(20) << __func__ << " " << *repop << dendl;
@@ -12646,7 +12785,7 @@ uint64_t PrimaryLogPG::recover_primary(uint64_t max, ThreadPool::TPHandle &handl
 	break;
       }
     }
-   
+
     if (!recovering.count(soid)) {
       if (recovering.count(head)) {
 	++skipped;
@@ -12669,12 +12808,12 @@ uint64_t PrimaryLogPG::recover_primary(uint64_t max, ThreadPool::TPHandle &handl
 	  break;
       }
     }
-    
+
     // only advance last_requested if we haven't skipped anything
     if (!skipped)
       recovery_state.set_last_requested(v);
   }
- 
+
   pgbackend->run_recovery_op(h, get_recovery_op_priority());
   return started;
 }
@@ -12963,6 +13102,7 @@ bool PrimaryLogPG::all_peer_done() const
  * io created objects since the last scan.  For this reason, we call
  * update_range() again before continuing backfill.
  */
+
 uint64_t PrimaryLogPG::recover_backfill(
   uint64_t max,
   ThreadPool::TPHandle &handle, bool *work_started)
@@ -12981,17 +13121,41 @@ uint64_t PrimaryLogPG::recover_backfill(
     new_backfill = false;
 
     // initialize BackfillIntervals
-    for (set<pg_shard_t>::const_iterator i = get_backfill_targets().begin();
-	 i != get_backfill_targets().end();
-	 ++i) {
-      peer_backfill_info[*i].reset(
-	recovery_state.get_peer_info(*i).last_backfill);
+    for (auto& bt : get_backfill_targets()) {
+      peer_backfill_info[bt].reset(
+	recovery_state.get_peer_info(bt).last_backfill);
+      backfill_ranges_to_skip.clear();
+      MOSDPGObjectInfo *m = new MOSDPGObjectInfo(
+        MOSDPGObjectInfo::OP_GET_DIFF,
+        pg_whoami,
+        spg_t(info.pgid.pgid, bt.shard),
+        get_osdmap_epoch(), get_last_peering_reset()
+      );
+      encode(backfill_tree.get_root()->value, m->get_data());
+      osd->send_message_osd_cluster(bt.osd, m, get_osdmap_epoch());
+      ceph_assert(waiting_on_backfill.find(bt) == waiting_on_backfill.end());
+      waiting_on_backfill.insert(bt);
     }
     backfill_info.reset(last_backfill_started);
 
     backfills_in_flight.clear();
     pending_backfill_updates.clear();
+
+    start_recovery_op(hobject_t::get_max());
+    return 1; //Return an operation, wait for ObjectInfos to populate
   }
+
+  std::stringstream ss;
+  for(auto &i : backfill_ranges_to_skip.get()) {
+    segment_t seg= i.first;
+    ss << '[';
+    ss << ',' << bg::get<0, 0>(seg);
+    ss << ',' << bg::get<0, 1>(seg);
+    ss << ',' << bg::get<1, 0>(seg);
+    ss << ',' << bg::get<1, 1>(seg);
+    ss << "] ";
+  }
+  dout(20) << "skip range idx values: " << ss.str() << dendl;
 
   for (set<pg_shard_t>::const_iterator i = get_backfill_targets().begin();
        i != get_backfill_targets().end();
@@ -13025,7 +13189,7 @@ uint64_t PrimaryLogPG::recover_backfill(
   PGBackend::RecoveryHandle *h = pgbackend->open_recovery_op();
   while (ops < max) {
     if (backfill_info.begin <= earliest_peer_backfill() &&
-	!backfill_info.extends_to_end() && backfill_info.empty()) {
+ 	    !backfill_info.extends_to_end() && backfill_info.empty()) {
       hobject_t next = backfill_info.end;
       backfill_info.reset(next);
       backfill_info.end = hobject_t::get_max();
@@ -13415,11 +13579,11 @@ void PrimaryLogPG::scan_range(
 
   vector<hobject_t> ls;
   ls.reserve(max);
-  int r = pgbackend->objects_list_partial(bi->begin, min, max, &ls, &bi->end);
+  int r = pgbackend->objects_list_partial(bi->begin, min, max, &ls, &bi->end, &backfill_ranges_to_skip);
   ceph_assert(r >= 0);
   dout(10) << " got " << ls.size() << " items, next " << bi->end << dendl;
   dout(20) << ls << dendl;
-
+  //TODO: trim backfill ranges to bi->end
   for (vector<hobject_t>::iterator p = ls.begin(); p != ls.end(); ++p) {
     handle.reset_tp_timeout();
     ObjectContextRef obc;
@@ -13455,7 +13619,7 @@ void PrimaryLogPG::scan_range(
 
 
 /** check_local
- * 
+ *
  * verifies that stray objects have been deleted
  */
 void PrimaryLogPG::check_local()
@@ -13496,7 +13660,6 @@ void PrimaryLogPG::check_local()
     }
   }
 }
-
 
 
 // ===========================

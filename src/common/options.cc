@@ -3274,6 +3274,11 @@ std::vector<Option> get_global_options() {
     .set_default(40)
     .set_description(""),
 
+    Option("osd_pg_object_info_size", Option::TYPE_UINT, Option::LEVEL_ADVANCED)
+    .set_default(1024)
+    .set_description("Size of pg object info structure")
+    .set_long_description("Size of pg object info structure, bigger numbers may increase backfill performance at the cost of memory utilization. Should be a power of 2"),
+
     Option("osd_min_pg_log_entries", Option::TYPE_UINT, Option::LEVEL_ADVANCED)
     .set_default(3000)
     .set_description("minimum number of entries to maintain in the PG log")

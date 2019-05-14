@@ -1179,6 +1179,13 @@ public:
     getline(ss, s);
     return ghobject_t(hobject_t(sobject_t(object_t(s.c_str()), 0)));
   }
+  static ghobject_t make_pg_objectstate_oid(spg_t pg) {
+    stringstream ss;
+    ss << "pg_objectstate_" << pg;
+    string s;
+    getline(ss, s);
+    return ghobject_t(hobject_t(sobject_t(object_t(s.c_str()), 0)));
+  }
   static ghobject_t make_infos_oid() {
     hobject_t oid(sobject_t("infos", CEPH_NOSNAP));
     return ghobject_t(oid);
@@ -1957,6 +1964,7 @@ private:
     case MSG_OSD_PG_PUSH:
     case MSG_OSD_PG_PULL:
     case MSG_OSD_PG_PUSH_REPLY:
+    case MSG_OSD_PG_OBJECT_INFO:
     case MSG_OSD_PG_SCAN:
     case MSG_OSD_PG_BACKFILL:
     case MSG_OSD_PG_BACKFILL_REMOVE:

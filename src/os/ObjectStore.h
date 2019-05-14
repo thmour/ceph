@@ -19,6 +19,7 @@
 #include "include/types.h"
 #include "include/stringify.h"
 #include "osd/osd_types.h"
+#include "osd/HashRangeIndex.h"
 #include "common/TrackedOp.h"
 #include "common/WorkQueue.h"
 #include "ObjectMap.h"
@@ -673,6 +674,13 @@ public:
 			      int max,
 			      std::vector<ghobject_t> *ls, ghobject_t *next) = 0;
 
+  virtual int collection_list_filtered(CollectionHandle &c,
+			      const ghobject_t& start, const ghobject_t& end,
+			      int max,
+			      std::vector<ghobject_t> *ls, ghobject_t *next,
+                  HashRangeIndex* exclude_ranges) {
+                    return 0;
+                  }
 
   /// OMAP
   /// Get omap contents

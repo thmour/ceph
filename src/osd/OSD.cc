@@ -98,6 +98,7 @@
 #include "messages/MOSDPGCreate.h"
 #include "messages/MOSDPGCreate2.h"
 #include "messages/MOSDPGTrim.h"
+#include "messages/MOSDPGObjectInfo.h"
 #include "messages/MOSDPGScan.h"
 #include "messages/MBackfillReserve.h"
 #include "messages/MRecoveryReserve.h"
@@ -4478,8 +4479,9 @@ PG* OSD::_make_pg(
   PGPool pool(cct, createmap, pgid.pool(), pi, name);
   PG *pg;
   if (pi.type == pg_pool_t::TYPE_REPLICATED ||
-      pi.type == pg_pool_t::TYPE_ERASURE)
+      pi.type == pg_pool_t::TYPE_ERASURE) {
     pg = new PrimaryLogPG(&service, createmap, pool, ec_profile, pgid);
+  }
   else
     ceph_abort();
   return pg;
@@ -4695,6 +4697,7 @@ void OSD::load_pgs()
     }
 
     pg->reg_next_scrub();
+    pg->get_or_create_object_info();
 
     dout(10) << __func__ << " loaded " << *pg << dendl;
     pg->unlock();

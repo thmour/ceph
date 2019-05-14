@@ -57,6 +57,10 @@ public:
   eversion_t pg_roll_forward_to;   // primary->replica: trim rollback
                                     // info to here
 
+  //versions to get updated 
+  eversion_t object_ctx_old_v;
+  eversion_t object_ctx_new_v;
+
   hobject_t new_temp_oid;      ///< new temp object that we must now start tracking
   hobject_t discard_temp_oid;  ///< previously used temp object that we can now stop tracking
 
@@ -100,6 +104,8 @@ public:
 
     decode(acks_wanted, p);
     decode(version, p);
+    decode(object_ctx_old_v, p);
+    decode(object_ctx_new_v, p);
     decode(logbl, p);
     decode(pg_stats, p);
     decode(pg_trim_to, p);
@@ -130,6 +136,8 @@ public:
 
     encode(acks_wanted, payload);
     encode(version, payload);
+    encode(object_ctx_old_v, payload);
+    encode(object_ctx_new_v, payload);
     encode(logbl, payload);
     encode(pg_stats, payload);
     encode(pg_trim_to, payload);
@@ -146,7 +154,7 @@ public:
       final_decode_needed(true), acks_wanted (0) {}
   MOSDRepOp(osd_reqid_t r, pg_shard_t from,
 	    spg_t p, const hobject_t& po, int aw,
-	    epoch_t mape, epoch_t min_epoch, ceph_tid_t rtid, eversion_t v)
+	    epoch_t mape, epoch_t min_epoch, ceph_tid_t rtid, eversion_t v, eversion_t old, eversion_t _new)
     : MOSDFastDispatchOp{MSG_OSD_REPOP, HEAD_VERSION, COMPAT_VERSION},
       map_epoch(mape),
       min_epoch(min_epoch),
@@ -156,7 +164,9 @@ public:
       from(from),
       poid(po),
       acks_wanted(aw),
-      version(v) {
+      version(v),
+      object_ctx_old_v(old),
+      object_ctx_new_v(_new) {
     set_tid(rtid);
   }
 private:
