@@ -12,6 +12,7 @@ import time
 from mgr_module import MgrModule, CommandResult
 from threading import Event
 from mgr_module import CRUSHMap
+from itertools import chain
 import datetime
 
 TIME_FORMAT = '%Y-%m-%d_%H:%M:%S'
@@ -321,6 +322,14 @@ class Module(MgrModule):
             'runtime': True,
         },
         {
+            'name': 'upmap_max_remaps',
+            'type': 'int',
+            'default': 50,
+            'min': 10,
+            'desc': 'Number of upmaps performed to remap the misplaced objects per iteration',
+            'runtime': True,
+        },
+        {
             'name': 'pool_ids',
             'type': 'str',
             'default': '',
@@ -410,6 +419,11 @@ class Module(MgrModule):
         {
             "cmd": "balancer execute name=plan,type=CephString",
             "desc": "Execute an optimization plan",
+            "perm": "rw",
+        },
+        {
+            "cmd": "balancer remap-misplaced-objects",
+            "desc": "Uses upmap to map misplaced objects back to their original position. Then the balancer (if enabled) will invalidate those upmaps to slowly balance the cluster",
             "perm": "rw",
         },
     ]
@@ -611,6 +625,16 @@ class Module(MgrModule):
                 return (-errno.ENOENT, '', 'plan %s not found' % command['plan'])
             r, detail = self.execute(plan)
             self.plan_rm(command['plan'])
+            return (r, '', detail)
+        elif command['prefix'] == 'balancer remap-misplaced-objects':
+            min_compat_client = self.get_osdmap().dump().get('require_min_compat_client', '')
+            if min_compat_client < 'luminous': # works well because version is alphabetized..
+                warn = 'min_compat_client "%s" ' \
+                       '< "luminous", which is required for pg-upmap. ' \
+                       'Try "ceph osd set-require-min-compat-client luminous" ' \
+                       'before enabling this mode' % min_compat_client
+                return (-errno.EPERM, '', warn)
+            r, detail = self.remap_misplaced_objects()
             return (r, '', detail)
         else:
             return (-errno.EINVAL, '',
@@ -1397,3 +1421,56 @@ class Module(MgrModule):
             'active': self.active,
             'mode': self.mode,
         }
+
+    def remap_pg(self, pgid, up=[], acting=[], pool_type='replicated'):
+        flatten = lambda l: list(chain.from_iterable(l))
+        if pool_type == 'replicated':
+            a = set(acting)
+            u = set(up)
+            return 0, flatten(zip(u-a, a-u))
+        elif pool_type == 'erasure':
+            return 0, flatten([(x,y) for x,y in zip(up, acting) if x != y])
+        else:
+            return -1, 'Pool type given not replicated or erasure'
+
+    def remap_misplaced_objects(self):
+        pool_type = {pool['pool']: 'replicated'
+                     if pool['erasure_code_profile'] == "" else 'erasure'
+                     for pool in self.get_osdmap().dump().get('pools')}
+        osdmap_items = self.get_osdmap().dump().get('pg_upmap_items')
+        pg_upmap_items = {item['pgid'] for item in osdmap_items}
+        remapped_pgs = filter(lambda pg: 'remapped' in pg['state'],
+                              self.get('pg_stats')['pg_stats'])
+        commands = []
+        for remapped_pg in remapped_pgs[:self.get_module_option('upmap_max_remaps')]:
+            pgid = remapped_pg['pgid']
+            if pgid in pg_upmap_items:
+                result = CommandResult('foo')
+                self.send_command(result, 'mon', '', json.dumps({
+                    'prefix': 'osd rm-pg-upmap-items',
+                    'format': 'json',
+                    'pgid': pgid,
+                }), 'foo')
+                commands.append(result)
+            osds = self.remap_pg(pgid, remapped_pg['up'],
+                                 remapped_pg['acting'],
+                                 pool_type[pgid.split('.')[0]])
+            if mapping:
+                result = CommandResult('foo')
+                self.send_command(result, 'mon', '', json.dumps({
+                    'prefix': 'osd pg-upmap-items',
+                    'format': 'json',
+                    'pgid': pgid,
+                    'id': osds),
+                }), 'foo')
+                commands.append(result)
+        # wait for commands
+        self.log.debug('commands %s' % commands)
+        for result in commands:
+            r, outb, outs = result.wait()
+            if r != 0:
+                self.log.error('execute error: r = %d, detail = %s' % (r, outs))
+                return r, outs
+        self.log.debug('done')
+        return 0, ''
+
